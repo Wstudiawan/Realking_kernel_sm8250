@@ -452,8 +452,6 @@ static struct ufs_dev_fix ufs_fixups[] = {
 		UFS_DEVICE_QUIRK_DELAY_BEFORE_LPM),
 	UFS_FIX(UFS_VENDOR_TOSHIBA, UFS_ANY_MODEL,
 		UFS_DEVICE_QUIRK_NO_LINK_OFF),
-	UFS_FIX(UFS_VENDOR_MICRON, UFS_ANY_MODEL,
-		UFS_DEVICE_QUIRK_NO_LINK_OFF),
 	UFS_FIX(UFS_VENDOR_TOSHIBA, "THGLF2G9C8KBADG",
 		UFS_DEVICE_QUIRK_PA_TACTIVATE),
 	UFS_FIX(UFS_VENDOR_TOSHIBA, "THGLF2G9D8KBADG",
@@ -4429,7 +4427,7 @@ static int ufshcd_query_flag_retry(struct ufs_hba *hba,
 
 	for (retries = 0; retries < QUERY_REQ_RETRIES; retries++) {
 		ret = ufshcd_query_flag(hba, opcode, idn, flag_res);
-		if (ret)
+		if (ret && ret != -ENODEV)
 			dev_dbg(hba->dev,
 				"%s: failed with error %d, retries %d\n",
 				__func__, ret, retries);
@@ -4462,6 +4460,9 @@ int ufshcd_query_flag(struct ufs_hba *hba, enum query_opcode opcode,
 	int timeout = QUERY_REQ_TIMEOUT;
 
 	BUG_ON(!hba);
+
+	if (ufshcd_is_shutdown_ongoing(hba) && ufshcd_is_ufs_dev_poweroff(hba))
+		return -ENODEV;
 
 	ufshcd_hold_all(hba);
 	mutex_lock(&hba->dev_cmd.lock);
@@ -4531,6 +4532,9 @@ int ufshcd_query_attr(struct ufs_hba *hba, enum query_opcode opcode,
 
 	BUG_ON(!hba);
 
+	if (ufshcd_is_shutdown_ongoing(hba) && ufshcd_is_ufs_dev_poweroff(hba))
+		return -ENODEV;
+
 	ufshcd_hold_all(hba);
 	if (!attr_val) {
 		dev_err(hba->dev, "%s: attribute value required for opcode 0x%x\n",
@@ -4599,7 +4603,7 @@ static int ufshcd_query_attr_retry(struct ufs_hba *hba,
 	 for (retries = QUERY_REQ_RETRIES; retries > 0; retries--) {
 		ret = ufshcd_query_attr(hba, opcode, idn, index,
 						selector, attr_val);
-		if (ret)
+		if (ret && ret != -ENODEV)
 			dev_dbg(hba->dev, "%s: failed with error %d, retries %d\n",
 				__func__, ret, retries);
 		else
@@ -4622,6 +4626,9 @@ static int __ufshcd_query_descriptor(struct ufs_hba *hba,
 	int err;
 
 	BUG_ON(!hba);
+
+	if (ufshcd_is_shutdown_ongoing(hba) && ufshcd_is_ufs_dev_poweroff(hba))
+		return -ENODEV;
 
 	ufshcd_hold_all(hba);
 	if (!desc_buf) {
@@ -4702,9 +4709,14 @@ int ufshcd_query_descriptor_retry(struct ufs_hba *hba,
 	int retries;
 
 	for (retries = QUERY_REQ_RETRIES; retries > 0; retries--) {
-		err = __ufshcd_query_descriptor(hba, opcode, idn, index,
+		err = -EAGAIN;
+		down_read(&hba->query_lock);
+		if (!ufshcd_is_link_hibern8(hba))
+			err = __ufshcd_query_descriptor(hba, opcode, idn, index,
 						selector, desc_buf, buf_len);
-		if (!err || err == -EINVAL)
+
+                up_read(&hba->query_lock);
+		if (!err || err == -EINVAL || err == -ENODEV)
 			break;
 	}
 
@@ -8491,8 +8503,12 @@ static int ufshcd_host_reset_and_restore(struct ufs_hba *hba)
 	ufshcd_set_clk_freq(hba, true);
 
 	err = ufshcd_hba_enable(hba);
-	if (err)
+	if (err) {
+		/* ufshcd_probe_hba() will put it */
+		if (!ufshcd_eh_in_progress(hba) && !hba->pm_op_in_progress)
+			pm_runtime_put_sync(hba->dev);
 		goto out;
+	}
 
 	/* Establish the link again and restore the device */
 	err = ufshcd_probe_hba(hba);
@@ -8544,6 +8560,8 @@ static int ufshcd_reset_and_restore(struct ufs_hba *hba)
 	ufshcd_enable_irq(hba);
 
 	do {
+		if (!ufshcd_eh_in_progress(hba) && !hba->pm_op_in_progress)
+			pm_runtime_get_sync(hba->dev);
 		err = ufshcd_detect_device(hba);
 	} while (err && --retries);
 
@@ -9404,8 +9422,8 @@ reinit:
 		ufshcd_hba_stop(hba, false);
 		ufs_spin_unlock_irqrestore(hba->host->host_lock, flags);
 
-		err = ufshcd_hba_enable(hba);
-		if (err)
+		ret = ufshcd_hba_enable(hba);
+		if (ret)
 			goto out;
 
 		goto reinit;
@@ -10718,8 +10736,8 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 #if defined(CONFIG_UFSFEATURE) && defined(CONFIG_UFSTW_LPM_DISABLED_ON_HIBERN8_FLUSH)
 	bool disable_lpm = false;
 #endif
+	bool need_upwrite = false;
 
-	hba->pm_op_in_progress = 1;
 	if (!ufshcd_is_shutdown_pm(pm_op)) {
 		pm_lvl = ufshcd_is_runtime_pm(pm_op) ?
 			 hba->rpm_lvl : hba->spm_lvl;
@@ -10741,6 +10759,14 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 #if defined(CONFIG_UFSFEATURE_31)
 	ufsf_suspend(hba->ufsf);
 #endif
+	if (ufshcd_is_runtime_pm(pm_op) &&
+			req_link_state == UIC_LINK_HIBERN8_STATE &&
+			ufshcd_is_auto_hibern8_supported(hba)) {
+		need_upwrite = true;
+		if (!down_write_trylock(&hba->query_lock))
+			return -EBUSY;
+	}
+	hba->pm_op_in_progress = 1;
 
 	/*
 	 * If we can't transition into any of the low power modes
@@ -10769,7 +10795,7 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 
 	/* UFS device & link must be active before we enter in this function */
 	if (!ufshcd_is_ufs_dev_active(hba) || !ufshcd_is_link_active(hba))
-		goto disable_clks;
+		goto set_vreg_lpm;
 
 #if defined(CONFIG_UFSFEATURE) && defined(CONFIG_UFSTW_LPM_DISABLED_ON_HIBERN8_FLUSH)
 	if (req_link_state == UIC_LINK_OFF_STATE)
@@ -10803,7 +10829,10 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 	      && !hba->wb_buf_flush_enabled) ||
 	     !ufshcd_is_runtime_pm(pm_op))) {
 		/* ensure that bkops is disabled */
-		ufshcd_disable_auto_bkops(hba);
+		ret = ufshcd_disable_auto_bkops(hba);
+		if (ret)
+			goto enable_gating;
+
 		ret = ufshcd_set_dev_pwr_mode(hba, req_dev_pwr_mode);
 		if (ret)
 			goto enable_gating;
@@ -10818,6 +10847,9 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 	    ufshcd_is_hibern8_on_idle_allowed(hba))
 		hba->hibern8_on_idle.state = HIBERN8_ENTERED;
 
+set_vreg_lpm:
+	if (!hba->auto_bkops_enabled)
+		ufshcd_vreg_set_lpm(hba);
 disable_clks:
 	/*
 	 * Call vendor specific suspend callback. As these callbacks may access
@@ -10833,13 +10865,6 @@ disable_clks:
 	 * host controller transaction expected till resume.
 	 */
 	ufshcd_disable_irq(hba);
-
-	/* reset the connected UFS device during power down */
-	if (ufshcd_is_link_off(hba)) {
-		ret = ufshcd_assert_device_reset(hba);
-		if (ret)
-			goto set_link_active;
-	}
 
 	if (!ufshcd_is_link_active(hba))
 		ret = ufshcd_disable_clocks(hba, false);
@@ -10860,14 +10885,6 @@ disable_clks:
 
 	/* Put the host controller in low power mode if possible */
 	ufshcd_hba_vreg_set_lpm(hba);
-#if defined(CONFIG_UFSFEATURE) && defined(CONFIG_UFSTW_LPM_DISABLED_ON_HIBERN8_FLUSH)
-	if ((!hba->auto_bkops_enabled && !disable_lpm) ||
-#else
-	if (!hba->auto_bkops_enabled ||
-#endif
-		!(req_dev_pwr_mode == UFS_ACTIVE_PWR_MODE &&
-		req_link_state == UIC_LINK_ACTIVE_STATE))
-		ufshcd_vreg_set_lpm(hba);
 	goto out;
 
 set_link_active:
@@ -10879,7 +10896,6 @@ set_link_active:
 		ufshcd_set_link_active(hba);
 	} else if (ufshcd_is_link_off(hba)) {
 		ufshcd_update_error_stats(hba, UFS_ERR_VOPS_SUSPEND);
-		ufshcd_deassert_device_reset(hba);
 		ufshcd_host_reset_and_restore(hba);
 	}
 set_dev_active:
@@ -10901,6 +10917,8 @@ enable_gating:
 #endif
 out:
 	hba->pm_op_in_progress = 0;
+	if (need_upwrite)
+		up_write(&hba->query_lock);
 
 	if (ret)
 		ufshcd_update_error_stats(hba, UFS_ERR_SUSPEND);
@@ -10929,18 +10947,17 @@ static int ufshcd_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 	old_pwr_mode = hba->curr_dev_pwr_mode;
 
 	ufshcd_hba_vreg_set_hpm(hba);
-
-	ret = ufshcd_vreg_set_hpm(hba);
-	if (ret)
-		goto out;
-
 	/* Make sure clocks are enabled before accessing controller */
 	ret = ufshcd_enable_clocks(hba);
 	if (ret)
-		goto disable_vreg;
+		goto out;
 
 	/* enable the host irq as host controller would be active soon */
 	ufshcd_enable_irq(hba);
+
+	ret = ufshcd_vreg_set_hpm(hba);
+	if (ret)
+		goto disable_irq_and_vops_clks;
 
 	/*
 	 * Call vendor specific resume callback. As these callbacks may access
@@ -10949,7 +10966,7 @@ static int ufshcd_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 	 */
 	ret = ufshcd_vops_resume(hba, pm_op);
 	if (ret)
-		goto disable_irq_and_vops_clks;
+		goto disable_vreg;
 
 	if (ufshcd_is_link_hibern8(hba)) {
 		ret = ufshcd_uic_hibern8_exit(hba);
@@ -11048,6 +11065,8 @@ set_old_link_state:
 		hba->hibern8_on_idle.state = HIBERN8_ENTERED;
 vendor_suspend:
 	ufshcd_vops_suspend(hba, pm_op);
+disable_vreg:
+	ufshcd_vreg_set_lpm(hba);
 disable_irq_and_vops_clks:
 	ufshcd_disable_irq(hba);
 	if (hba->clk_scaling.is_allowed)
@@ -11055,8 +11074,6 @@ disable_irq_and_vops_clks:
 	ufshcd_disable_clocks(hba, false);
 	if (ufshcd_is_clkgating_allowed(hba))
 		hba->clk_gating.state = CLKS_OFF;
-disable_vreg:
-	ufshcd_vreg_set_lpm(hba);
 out:
 	hba->pm_op_in_progress = 0;
 
@@ -11544,6 +11561,7 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 	mutex_init(&hba->dev_cmd.lock);
 
 	init_rwsem(&hba->lock);
+	init_rwsem(&hba->query_lock);
 
 	/* Initialize device management tag acquire wait queue */
 	init_waitqueue_head(&hba->dev_cmd.tag_wq);
