@@ -1621,7 +1621,6 @@ static int dsi_panel_parse_dyn_clk_caps(struct dsi_panel *panel)
 	bool supported = false;
 	struct dsi_dyn_clk_caps *dyn_clk_caps = &panel->dyn_clk_caps;
 	struct dsi_parser_utils *utils = &panel->utils;
-	const char *name = panel->name;
 	const char *type;
 
 	supported = utils->read_bool(utils->data, "qcom,dsi-dyn-clk-enable");
@@ -1682,7 +1681,6 @@ static int dsi_panel_parse_dfps_caps(struct dsi_panel *panel)
 	bool supported = false;
 	struct dsi_dfps_capabilities *dfps_caps = &panel->dfps_caps;
 	struct dsi_parser_utils *utils = &panel->utils;
-	const char *name = panel->name;
 	const char *type;
 	u32 i;
 
@@ -1955,7 +1953,6 @@ static int dsi_panel_parse_phy_props(struct dsi_panel *panel)
 	const char *str;
 	struct dsi_panel_phy_props *props = &panel->phy_props;
 	struct dsi_parser_utils *utils = &panel->utils;
-	const char *name = panel->name;
 
 	rc = utils->read_u32(utils->data,
 		  "qcom,mdss-pan-physical-width-dimension", &val);
@@ -2470,14 +2467,12 @@ static int dsi_panel_parse_misc_features(struct dsi_panel *panel)
 {
 	struct dsi_parser_utils *utils = &panel->utils;
 
-	panel->ulps_feature_enabled =
-		utils->read_bool(utils->data, "qcom,ulps-enabled");
+	panel->ulps_feature_enabled = true;
 
 	DSI_DEBUG("%s: ulps feature %s\n", __func__,
 		(panel->ulps_feature_enabled ? "enabled" : "disabled"));
 
-	panel->ulps_suspend_enabled =
-		utils->read_bool(utils->data, "qcom,suspend-ulps-enabled");
+	panel->ulps_suspend_enabled = true;
 
 	DSI_DEBUG("%s: ulps during suspend feature %s\n", __func__,
 		(panel->ulps_suspend_enabled ? "enabled" : "disabled"));
@@ -4581,17 +4576,11 @@ int dsi_panel_set_lp2(struct dsi_panel *panel)
 	if (!panel->panel_initialized)
 		goto exit;
 
-	//It has been observed entering lp2 without first entering lp1 on doze.
-	//In this case regulator stays in NORMAL mode, which is a power regression.
-	if (dsi_panel_is_type_oled(panel) &&
-	    panel->power_mode != SDE_MODE_DPMS_LP1)
-		dsi_pwr_panel_regulator_mode_set(&panel->power_info,
-			"ibb", REGULATOR_MODE_IDLE);
-
 	rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_LP2);
 	if (rc)
 		DSI_ERR("[%s] failed to send DSI_CMD_SET_LP2 cmd, rc=%d\n",
 		       panel->name, rc);
+
 exit:
 	mutex_unlock(&panel->panel_lock);
 	display_utc_time_marker("DSI_CMD_SET_LP2");

@@ -1016,7 +1016,6 @@ static int parse_xfer_event(struct mhi_controller *mhi_cntrl,
 	case MHI_EV_CC_DB_MODE:
 		MHI_VERB("DB_MODE chan %d.\n", mhi_chan->chan);
 		mhi_chan->db_cfg.db_mode = true;
-
 		mhi_chan->mode_change++;
 
 		read_lock_irqsave(&mhi_cntrl->pm_lock, rflags);
@@ -1730,15 +1729,14 @@ irqreturn_t mhi_intvec_handlr(int irq_number, void *dev)
 {
 
 	struct mhi_controller *mhi_cntrl = dev;
+	u32 in_reset = -1;
 
 	/* wake up any events waiting for state change */
 	MHI_VERB("Enter\n");
 	if (unlikely(mhi_cntrl->initiate_mhi_reset)) {
-		u32 in_reset;
-
-		if (!mhi_read_reg_field(mhi_cntrl, mhi_cntrl->regs, MHICTRL,
-			MHICTRL_RESET_MASK, MHICTRL_RESET_SHIFT, &in_reset))
-			mhi_cntrl->initiate_mhi_reset = !!in_reset;
+		mhi_read_reg_field(mhi_cntrl, mhi_cntrl->regs, MHICTRL,
+			MHICTRL_RESET_MASK, MHICTRL_RESET_SHIFT, &in_reset);
+		mhi_cntrl->initiate_mhi_reset = !!in_reset;
 	}
 	wake_up_all(&mhi_cntrl->state_event);
 	MHI_VERB("Exit\n");
