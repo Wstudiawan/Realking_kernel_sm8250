@@ -78,6 +78,40 @@
 
 int suid_dumpable = 0;
 
+#define LIBPERFMGR "/vendor/bin/hw/android.hardware.power-service.xiaomi-libperfmgr"
+#define LIBPERFMGR_BIN "/vendor/bin/hw/android.hardware.power-service.xiaomi-sm8250-libperfmgr"
+#define PERF "/vendor/bin/hw/vendor.qti.hardware.perf-hal-service"
+#define PERFD "/vendor/bin/hw/vendor.qti.hardware.perf2-hal-service"
+#define SERVICEMANAGER_BIN "/system/bin/servicemanager"
+
+static struct task_struct *servicemanager_tsk;
+bool task_is_servicemanager(struct task_struct *p)
+{
+	return p == READ_ONCE(servicemanager_tsk);
+}
+
+static struct task_struct *powerhal_tsk;
+bool task_is_powerhal(struct task_struct *p)
+{
+	struct task_struct *tsk;
+	bool ret;
+
+	rcu_read_lock();
+	tsk = READ_ONCE(powerhal_tsk);
+	ret = tsk && same_thread_group(p, tsk);
+	rcu_read_unlock();
+
+	return ret;
+}
+
+void dead_special_task(void)
+{
+	if (unlikely(current == servicemanager_tsk))
+		WRITE_ONCE(servicemanager_tsk, NULL);
+	else if (unlikely(current == powerhal_tsk))
+		WRITE_ONCE(powerhal_tsk, NULL);
+}
+
 static LIST_HEAD(formats);
 static DEFINE_RWLOCK(binfmt_lock);
 
@@ -1755,30 +1789,6 @@ static int exec_binprm(struct linux_binprm *bprm)
 	return ret;
 }
 
-static void android_service_blacklist(const char *name)
-{
-#define FULL(x) { x, sizeof(x) }
-#define PREFIX(x) { x, sizeof(x) - 1 }
-	struct {
-		const char *path;
-		size_t len;
-	} static const blacklist[] = {
-		FULL("/vendor/bin/msm_irqbalance"),
-	};
-#undef FULL
-#undef PREFIX
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(blacklist); i++) {
-		if (!strncmp(blacklist[i].path, name, blacklist[i].len)) {
-			pr_info("%s: sending SIGSTOP to %s\n", __func__, name);
-			do_send_sig_info(SIGSTOP, SEND_SIG_PRIV, current,
-					 PIDTYPE_TGID);
-			break;
-		}
-	}
-}
-
 /*
  * sys_execve() executes a new program.
  */
@@ -1915,8 +1925,19 @@ static int __do_execve_file(int fd, struct filename *filename,
 			zygote64_sig = current->signal;
 	}
 
-	if (is_global_init(current->parent))
-		android_service_blacklist(filename->name);
+	if (is_global_init(current->parent)) {
+		if (unlikely(!strcmp(filename->name, LIBPERFMGR))) {
+			WRITE_ONCE(powerhal_tsk, current);
+                } else if (unlikely(!strcmp(filename->name, LIBPERFMGR_BIN))) {
+                        WRITE_ONCE(powerhal_tsk, current);
+                } else if (unlikely(!strcmp(filename->name, PERF))) {
+                        WRITE_ONCE(powerhal_tsk, current);
+                } else if (unlikely(!strcmp(filename->name, PERFD))) {
+                        WRITE_ONCE(powerhal_tsk, current);
+		} else if (unlikely(!strcmp(filename->name, SERVICEMANAGER_BIN))) {
+			WRITE_ONCE(servicemanager_tsk, current);
+		}
+	}
 
 	/* execve succeeded */
 	current->fs->in_exec = 0;
