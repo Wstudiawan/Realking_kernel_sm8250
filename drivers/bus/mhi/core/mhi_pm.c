@@ -550,18 +550,13 @@ static int mhi_pm_mission_mode_transition(struct mhi_controller *mhi_cntrl)
 	mhi_special_events_pending(mhi_cntrl);
 
 	/* setup sysfs nodes for userspace votes */
-	ret = mhi_create_sysfs(mhi_cntrl);
-	if (ret) {
-		MHI_ERR("Failed to create sysfs nodes with ret:%d\n", ret);
-		goto error_sysfs_create;
-	}
+	mhi_create_sysfs(mhi_cntrl);
 
 	MHI_CNTRL_LOG("Adding new devices\n");
 
 	/* add supported devices */
 	mhi_create_devices(mhi_cntrl);
 
-error_sysfs_create:
 	read_lock_bh(&mhi_cntrl->pm_lock);
 
 error_mission_mode:
@@ -1517,15 +1512,6 @@ int mhi_pm_fast_resume(struct mhi_controller *mhi_cntrl, bool notify_client)
 	}
 
 	if (mhi_cntrl->rddm_supported) {
-
-		/* check EP is in proper state */
-		if (mhi_cntrl->link_status(mhi_cntrl, mhi_cntrl->priv_data)) {
-			MHI_ERR("Unable to access EP Config space\n");
-			write_unlock_irq(&mhi_cntrl->pm_lock);
-			tasklet_enable(&mhi_cntrl->mhi_event->task);
-			return -ETIMEDOUT;
-		}
-
 		if (mhi_get_exec_env(mhi_cntrl) == MHI_EE_RDDM &&
 		    !mhi_cntrl->power_down) {
 			mhi_cntrl->ee = MHI_EE_RDDM;

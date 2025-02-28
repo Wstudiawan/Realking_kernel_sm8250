@@ -2404,6 +2404,15 @@ static irqreturn_t msm_hs_wakeup_isr(int irq, void *dev)
 		 */
 		if (msm_uport->wakeup.inject_rx) {
 			tty = uport->state->port.tty;
+			/* uport->state->port.tty pointer initialized as part of
+			 * UART port_open. Adding null check to ensure tty should
+			 * have a valid value before dereference it in wakeup_isr.
+			 */
+			if (!tty) {
+				MSM_HS_ERR("%s: Unexpected wakeup ISR\n", __func__);
+				spin_unlock_irqrestore(&uport->lock, flags);
+				return IRQ_HANDLED;
+			}
 			tty_insert_flip_char(tty->port,
 					     msm_uport->wakeup.rx_to_inject,
 					     TTY_NORMAL);
@@ -2749,6 +2758,7 @@ static int uartdm_init_port(struct uart_port *uport)
 	struct msm_hs_port *msm_uport = UARTDM_TO_MSM(uport);
 	struct msm_hs_tx *tx = &msm_uport->tx;
 	struct msm_hs_rx *rx = &msm_uport->rx;
+	struct sched_param param = { .sched_priority = 1 };
 
 	init_waitqueue_head(&rx->wait);
 	init_waitqueue_head(&tx->wait);
@@ -2763,6 +2773,8 @@ static int uartdm_init_port(struct uart_port *uport)
 		MSM_HS_ERR("%s(): error creating task\n", __func__);
 		goto exit_lh_init;
 	}
+	sched_setscheduler(rx->task, SCHED_FIFO, &param);
+
 	kthread_init_work(&rx->kwork, msm_serial_hs_rx_work);
 
 	kthread_init_worker(&tx->kworker);
@@ -2772,6 +2784,7 @@ static int uartdm_init_port(struct uart_port *uport)
 		MSM_HS_ERR("%s(): error creating task\n", __func__);
 		goto exit_lh_init;
 	}
+	sched_setscheduler(tx->task, SCHED_FIFO, &param);
 
 	kthread_init_work(&tx->kwork, msm_serial_hs_tx_work);
 

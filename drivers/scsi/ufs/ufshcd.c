@@ -229,7 +229,7 @@ static void ufshcd_update_uic_error_cnt(struct ufs_hba *hba, u32 reg, int type)
 				 UTP_TASK_REQ_COMPL |\
 				 UFSHCD_ERROR_MASK)
 /* UIC command timeout, unit: ms */
-#define UIC_CMD_TIMEOUT	500
+#define UIC_CMD_TIMEOUT	3000
 
 #define UIC_MI_CMD_TIMEOUT	3000
 /* NOP OUT retries waiting for NOP IN response */
@@ -263,8 +263,8 @@ static void ufshcd_update_uic_error_cnt(struct ufs_hba *hba, u32 reg, int type)
 /* Interrupt aggregation default timeout, unit: 40us */
 #define INT_AGGR_DEF_TO	0x02
 
-/* default value of auto suspend is 3 seconds */
-#define UFSHCD_AUTO_SUSPEND_DELAY_MS 3000 /* millisecs */
+/* default value of auto suspend is 1 second */
+#define UFSHCD_AUTO_SUSPEND_DELAY_MS 1000 /* millisecs */
 
 /* default value of ref clock gating wait time is 100 micro seconds */
 #define UFSHCD_REF_CLK_GATING_WAIT_US 100 /* microsecs */
@@ -665,7 +665,7 @@ static void ufshcd_add_tm_upiu_trace(struct ufs_hba *hba, unsigned int tag,
 	struct utp_upiu_task_req *task_req;
 	int off = (int)tag - hba->nutrs;
 
-	descp = &hba->utmrdl_base_addr[off];
+        descp = &hba->utmrdl_base_addr[off];
 	task_req = (struct utp_upiu_task_req *)descp->task_req_upiu;
 	trace_ufshcd_upiu(dev_name(hba->dev), str, &task_req->header,
 			&task_req->input_param1);
@@ -997,6 +997,7 @@ static void ufshcd_print_tmrs(struct ufs_hba *hba, unsigned long bitmap)
 
 	for_each_set_bit(tag, &bitmap, hba->nutmrs) {
 		tmrdp = &hba->utmrdl_base_addr[tag];
+
 		dev_err(hba->dev, "TM[%d] - Task Management Header\n", tag);
 		ufshcd_hex_dump(hba, "TM TRD", &tmrdp->header,
 				sizeof(struct request_desc_header));
@@ -1769,7 +1770,7 @@ out:
 
 static int ufshcd_clock_scaling_prepare(struct ufs_hba *hba)
 {
-	#define DOORBELL_CLR_TOUT_US		(1000 * 1000) /* 1 sec */
+	#define DOORBELL_CLR_TOUT_US		(40 * 1000 * 1000) /* 40 sec */
 	int ret = 0;
 	/*
 	 * make sure that there are no outstanding requests when
@@ -2613,19 +2614,18 @@ static ssize_t ufshcd_clkgate_enable_store(struct device *dev,
 		return -EINVAL;
 
 	value = !!value;
+
+	spin_lock_irqsave(hba->host->host_lock, flags);
 	if (value == hba->clk_gating.is_enabled)
 		goto out;
-
-	if (value) {
-		ufshcd_release(hba, false);
-	} else {
-		ufs_spin_lock_irqsave(hba->host->host_lock, flags);
+	if (value)
+		hba->clk_gating.active_reqs--;
+	else
 		hba->clk_gating.active_reqs++;
-		ufs_spin_unlock_irqrestore(hba->host->host_lock, flags);
-	}
 
 	hba->clk_gating.is_enabled = value;
 out:
+	spin_unlock_irqrestore(hba->host->host_lock, flags);
 	return count;
 }
 
@@ -5271,14 +5271,16 @@ static inline void ufshcd_add_delay_before_dme_cmd(struct ufs_hba *hba)
 			min_sleep_time_us =
 				MIN_DELAY_BEFORE_DME_CMDS_US - delta;
 		else
-			return; /* no more delay required */
+			min_sleep_time_us = 0; /* no more delay required */
 	}
 
-	/* allow sleep for extra 50us if needed */
-	if (!oops_in_progress)
+	if (min_sleep_time_us > 0) {
+		/* allow sleep for extra 50us if needed */
 		usleep_range(min_sleep_time_us, min_sleep_time_us + 50);
-	else
-		udelay(min_sleep_time_us);
+	}
+
+	/* update the last_dme_cmd_tstamp */
+	hba->last_dme_cmd_tstamp = ktime_get();
 }
 
 static inline void ufshcd_save_tstamp_of_last_dme_cmd(
@@ -8199,7 +8201,9 @@ static int ufshcd_issue_tm_cmd(struct ufs_hba *hba, int lun_id, int task_id,
 		err = -ETIMEDOUT;
 	} else {
 		err = ufshcd_task_req_compl(hba, free_slot, tm_response);
+
 		ufshcd_add_tm_upiu_trace(hba, task_tag, "tm_complete");
+
 	}
 
 	clear_bit(free_slot, &hba->tm_condition);
@@ -9351,6 +9355,50 @@ static inline bool ufshcd_needs_reinit(struct ufs_hba *hba)
 	return reinit;
 }
 
+static char serial[QUERY_DESC_MAX_SIZE] = { 0 };
+
+char *ufs_get_serial(void)
+{
+	return serial;
+}
+
+static int ufs_init_serial(struct ufs_hba *hba)
+{
+	int err, i;
+	u8 model_index;
+	u8 str_desc_buf[QUERY_DESC_MAX_SIZE + 1];
+	u8 desc_buf[QUERY_DESC_DEVICE_DEF_SIZE];
+
+	err = ufshcd_read_device_desc(hba, desc_buf,
+				      QUERY_DESC_DEVICE_DEF_SIZE);
+	if (err) {
+		dev_err(hba->dev, "read device_desc failed\n");
+		goto out;
+	}
+
+	/*SerialNumber*/
+	model_index = desc_buf[DEVICE_DESC_PARAM_SN];
+	memset(str_desc_buf, 0, QUERY_DESC_MAX_SIZE);
+	err = ufshcd_read_string_desc(hba, model_index, str_desc_buf,
+				      QUERY_DESC_MAX_SIZE, FALSE);
+	if (err) {
+		dev_err(hba->dev, "read string descriptor failed\n");
+		goto out;
+	}
+
+	for (i = 2; ((i < str_desc_buf[QUERY_DESC_LENGTH_OFFSET]) &&
+		     (i < QUERY_DESC_MAX_SIZE / 2));
+	     i += 2) {
+		snprintf(serial + i * 2 - 4, 5, "%02x%02x", str_desc_buf[i],
+			 str_desc_buf[i + 1]);
+	}
+
+	dev_info(hba->dev, "SerialNumber: %s\n", serial);
+
+out:
+	return err;
+}
+
 /**
  * ufshcd_probe_hba - probe hba to detect device and initialize
  * @hba: per-adapter instance
@@ -9431,6 +9479,7 @@ reinit:
 
 	ufs_fixup_device_setup(hba, &card);
 	ufshcd_tune_unipro_params(hba);
+	ufs_init_serial(hba);
 
 	ufshcd_apply_pm_quirks(hba);
 	if (card.wspecversion < 0x300) {

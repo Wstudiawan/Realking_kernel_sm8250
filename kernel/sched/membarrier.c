@@ -34,6 +34,8 @@
 	| MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED			\
 	| MEMBARRIER_PRIVATE_EXPEDITED_SYNC_CORE_BITMASK)
 
+static DEFINE_MUTEX(membarrier_ipi_mutex);
+
 static void ipi_mb(void *info)
 {
 	smp_mb();	/* IPIs should be serializing but paranoid. */
@@ -64,6 +66,7 @@ static int membarrier_global_expedited(void)
 		fallback = true;
 	}
 
+	mutex_lock(&membarrier_ipi_mutex);
 	cpus_read_lock();
 	for_each_online_cpu(cpu) {
 		struct task_struct *p;
@@ -104,6 +107,7 @@ static int membarrier_global_expedited(void)
 	 * rq->curr modification in scheduler.
 	 */
 	smp_mb();	/* exit from system call is not a mb */
+	mutex_unlock(&membarrier_ipi_mutex);
 	return 0;
 }
 
@@ -144,6 +148,7 @@ static int membarrier_private_expedited(int flags)
 		fallback = true;
 	}
 
+	mutex_lock(&membarrier_ipi_mutex);
 	cpus_read_lock();
 	for_each_online_cpu(cpu) {
 		struct task_struct *p;
@@ -182,6 +187,7 @@ static int membarrier_private_expedited(int flags)
 	 * rq->curr modification in scheduler.
 	 */
 	smp_mb();	/* exit from system call is not a mb */
+	mutex_unlock(&membarrier_ipi_mutex);
 
 	return 0;
 }
@@ -210,7 +216,7 @@ static int membarrier_register_global_expedited(void)
 		 * future scheduler executions will observe the new
 		 * thread flag state for this mm.
 		 */
-		synchronize_sched();
+		synchronize_rcu();
 	}
 	atomic_or(MEMBARRIER_STATE_GLOBAL_EXPEDITED_READY,
 		  &mm->membarrier_state);
@@ -246,7 +252,7 @@ static int membarrier_register_private_expedited(int flags)
 		 * Ensure all future scheduler executions will observe the
 		 * new thread flag state for this process.
 		 */
-		synchronize_sched();
+		synchronize_rcu();
 	}
 	atomic_or(state, &mm->membarrier_state);
 
@@ -298,7 +304,7 @@ SYSCALL_DEFINE2(membarrier, int, cmd, int, flags)
 		if (tick_nohz_full_enabled())
 			return -EINVAL;
 		if (num_online_cpus() > 1)
-			synchronize_sched();
+			synchronize_rcu();
 		return 0;
 	case MEMBARRIER_CMD_GLOBAL_EXPEDITED:
 		return membarrier_global_expedited();

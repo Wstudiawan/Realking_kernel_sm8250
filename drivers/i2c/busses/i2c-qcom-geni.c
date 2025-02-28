@@ -69,7 +69,7 @@
 #define DM_I2C_CB_ERR		((BIT(GP_IRQ1) | BIT(GP_IRQ3) | BIT(GP_IRQ4)) \
 									<< 5)
 
-#define I2C_AUTO_SUSPEND_DELAY	250
+#define I2C_AUTO_SUSPEND_DELAY	100
 
 #define I2C_TIMEOUT_SAFETY_COEFFICIENT	10
 
@@ -1062,7 +1062,8 @@ static int geni_i2c_probe(struct platform_device *pdev)
 	init_completion(&gi2c->xfer);
 	platform_set_drvdata(pdev, gi2c);
 	ret = devm_request_irq(gi2c->dev, gi2c->irq, geni_i2c_irq,
-			       IRQF_TRIGGER_HIGH, "i2c_geni", gi2c);
+			       IRQF_TRIGGER_HIGH | IRQF_NOBALANCING,
+			       "i2c_geni", gi2c);
 	if (ret) {
 		dev_err(gi2c->dev, "Request_irq failed:%d: err:%d\n",
 				   gi2c->irq, ret);

@@ -30,7 +30,7 @@ SCHED_FEAT(LAST_BUDDY, true)
  * Consider buddies to be cache hot, decreases the likelyness of a
  * cache buddy being migrated away, increases cache locality.
  */
-SCHED_FEAT(CACHE_HOT_BUDDY, true)
+SCHED_FEAT(CACHE_HOT_BUDDY, false)
 
 /*
  * Allow wakeup-time preemption of the current task:
@@ -65,7 +65,7 @@ SCHED_FEAT(SIS_PROP, true)
  */
 SCHED_FEAT(WARN_DOUBLE_CLOCK, false)
 
-#ifdef HAVE_RT_PUSH_IPI
+#if defined(CONFIG_IRQ_WORK) && defined(CONFIG_SMP)
 /*
  * In order to avoid a thundering herd attack of CPUs that are
  * lowering their priorities at the same time, and there being

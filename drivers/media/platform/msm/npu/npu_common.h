@@ -109,12 +109,6 @@ struct npu_debugfs_ctx {
 	struct dentry *root;
 	uint32_t reg_off;
 	uint32_t reg_cnt;
-	uint8_t *log_buf;
-	struct mutex log_lock;
-	uint32_t log_num_bytes_buffered;
-	uint32_t log_read_index;
-	uint32_t log_write_index;
-	uint32_t log_buf_size;
 };
 
 struct npu_debugfs_reg_ctx {
@@ -312,8 +306,10 @@ struct ipcc_mbox_chan {
  * Function Prototypes
  * -------------------------------------------------------------------------
  */
+#ifdef CONFIG_DEBUG_FS
 int npu_debugfs_init(struct npu_device *npu_dev);
 void npu_debugfs_deinit(struct npu_device *npu_dev);
+#endif
 
 int npu_enable_core_power(struct npu_device *npu_dev);
 void npu_disable_core_power(struct npu_device *npu_dev);

@@ -5178,6 +5178,7 @@ static ssize_t sysfs_hbm_write(struct device *dev,
 {
 	struct dsi_display *display = dev_get_drvdata(dev);
 	int ret, hbm_mode;
+        int bl_lvl_before_hbm = display->panel->bl_config.bl_level;
 
 	if (!display->panel)
 		return -EINVAL;
@@ -5205,6 +5206,13 @@ static ssize_t sysfs_hbm_write(struct device *dev,
 	ret = dsi_panel_apply_hbm_mode(display->panel);
 	if (ret)
 		pr_err("unable to set hbm mode\n");
+
+	if (hbm_mode == 0) {
+		/* hbm off cmd sets brightness to an
+		 * arbitrary value; setting it to the right value needs to be done
+		 * separately */
+		dsi_panel_set_backlight(display->panel,bl_lvl_before_hbm);
+	}
 
 	ret = dsi_display_clk_ctrl(display->dsi_clk_handle,
 			DSI_CORE_CLK, DSI_CLK_OFF);
@@ -7962,7 +7970,7 @@ int dsi_display_enable(struct dsi_display *display)
 	mode = display->panel->cur_mode;
 
 	if (mode->dsi_mode_flags & DSI_MODE_FLAG_DMS) {
-		rc = dsi_panel_post_switch(display->panel);
+		rc = dsi_panel_switch(display->panel);
 		if (rc) {
 			DSI_ERR("[%s] failed to switch DSI panel mode, rc=%d\n",
 				   display->name, rc);
@@ -7991,7 +7999,7 @@ int dsi_display_enable(struct dsi_display *display)
 	}
 
 	if (mode->dsi_mode_flags & DSI_MODE_FLAG_DMS) {
-		rc = dsi_panel_switch(display->panel);
+		rc = dsi_panel_post_switch(display->panel);
 		if (rc) {
 			DSI_ERR("[%s] failed to switch DSI panel mode, rc=%d\n",
 				   display->name, rc);

@@ -636,15 +636,6 @@ config ZSMALLOC_STAT
 	  information to userspace via debugfs.
 	  If unsure, say N.
 
-config VMAP_LAZY_PURGING_FACTOR
-	int "multiplier to the size of purged vmap areas"
-	default "8" if ARM
-	default "32"
-	help
-	  It is used as a multiplier to the max VA pages purged in a
-	  single attempt. For 32-bit in order to reduce fragmentation
-	  of vmalloc space, we decrease the default value to "8".
-
 config ZSMALLOC_CHAIN_SIZE
 	int "Maximum number of physical pages per-zspage"
 	default 4
@@ -870,23 +861,35 @@ config GUP_BENCHMARK
 config ARCH_HAS_PTE_SPECIAL
 	bool
 
-endmenu
-
-config PROCESS_RECLAIM
-	bool "Enable process reclaim"
-	depends on PROC_FS
-	default y
+# multi-gen LRU {
+config LRU_GEN
+	bool "Multi-Gen LRU"
+	depends on MMU
+	# the following options can use up the spare bits in page flags
+	depends on !MAXSMP && (64BIT || !SPARSEMEM || SPARSEMEM_VMEMMAP)
+        default y
 	help
-	 It allows to reclaim pages of the process by /proc/pid/reclaim.
+	  A high performance LRU implementation to overcommit memory. See
+	  Documentation/admin-guide/mm/multigen_lru.rst for details.
 
-	 (echo file > /proc/PID/reclaim) reclaims file-backed pages only.
-	 (echo anon > /proc/PID/reclaim) reclaims anonymous pages only.
-	 (echo all > /proc/PID/reclaim) reclaims all pages.
+config LRU_GEN_ENABLED
+	bool "Enable by default"
+	depends on LRU_GEN
+        default y
+	help
+	  This option enables the multi-gen LRU by default.
 
-	 (echo addr size-byte > /proc/PID/reclaim) reclaims pages in
-	 (addr, addr + size-bytes) of the process.
+config LRU_GEN_STATS
+	bool "Full stats for debugging"
+	depends on LRU_GEN
+	help
+	  Do not enable this option unless you plan to look at historical stats
+	  from evicted generations for debugging purpose.
 
-	 Any other value is ignored.
+	  This option has a per-memcg and per-node memory overhead.
+# }
+
+endmenu
 
 config FORCE_ALLOC_FROM_DMA_ZONE
 	bool "Force certain memory allocators to always return ZONE_DMA32 memory"

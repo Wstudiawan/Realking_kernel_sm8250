@@ -546,7 +546,6 @@ struct utp_transfer_req_desc {
 	__le16  prd_table_length;
 	__le16  prd_table_offset;
 };
-
 /**
  * struct utp_task_req_desc - UTMRD structure
  * @header: UTMRD header DW-0 to DW-3

@@ -78,6 +78,40 @@
 
 int suid_dumpable = 0;
 
+#define LIBPERFMGR "/vendor/bin/hw/android.hardware.power-service.xiaomi-libperfmgr"
+#define LIBPERFMGR_BIN "/vendor/bin/hw/android.hardware.power-service.xiaomi-sm8250-libperfmgr"
+#define PERF "/vendor/bin/hw/vendor.qti.hardware.perf-hal-service"
+#define PERFD "/vendor/bin/hw/vendor.qti.hardware.perf2-hal-service"
+#define SERVICEMANAGER_BIN "/system/bin/servicemanager"
+
+static struct task_struct *servicemanager_tsk;
+bool task_is_servicemanager(struct task_struct *p)
+{
+	return p == READ_ONCE(servicemanager_tsk);
+}
+
+static struct task_struct *powerhal_tsk;
+bool task_is_powerhal(struct task_struct *p)
+{
+	struct task_struct *tsk;
+	bool ret;
+
+	rcu_read_lock();
+	tsk = READ_ONCE(powerhal_tsk);
+	ret = tsk && same_thread_group(p, tsk);
+	rcu_read_unlock();
+
+	return ret;
+}
+
+void dead_special_task(void)
+{
+	if (unlikely(current == servicemanager_tsk))
+		WRITE_ONCE(servicemanager_tsk, NULL);
+	else if (unlikely(current == powerhal_tsk))
+		WRITE_ONCE(powerhal_tsk, NULL);
+}
+
 static LIST_HEAD(formats);
 static DEFINE_RWLOCK(binfmt_lock);
 
@@ -839,6 +873,7 @@ int transfer_args_to_stack(struct linux_binprm *bprm,
 			goto out;
 	}
 
+	bprm->exec += *sp_location - MAX_ARG_PAGES * PAGE_SIZE;
 	*sp_location = sp;
 
 out:
@@ -1049,6 +1084,7 @@ static int exec_mmap(struct mm_struct *mm)
 	active_mm = tsk->active_mm;
 	tsk->active_mm = mm;
 	tsk->mm = mm;
+	lru_gen_add_mm(mm);
 	/*
 	 * This prevents preemption while active_mm is being loaded and
 	 * it and mm are being updated, which could cause problems for
@@ -1061,6 +1097,7 @@ static int exec_mmap(struct mm_struct *mm)
 	activate_mm(active_mm, mm);
 	if (IS_ENABLED(CONFIG_ARCH_WANT_IRQS_OFF_ACTIVATE_MM))
 		local_irq_enable();
+	lru_gen_use_mm(mm);
 	tsk->mm->vmacache_seqnum = 0;
 	vmacache_flush(tsk);
 	task_unlock(tsk);
@@ -1562,6 +1599,7 @@ static void bprm_fill_uid(struct linux_binprm *bprm)
 	unsigned int mode;
 	kuid_t uid;
 	kgid_t gid;
+	int err;
 
 	/*
 	 * Since this can be called multiple times (via prepare_binprm),
@@ -1586,11 +1624,16 @@ static void bprm_fill_uid(struct linux_binprm *bprm)
 	/* Be careful if suid/sgid is set */
 	inode_lock(inode);
 
-	/* reload atomically mode/uid/gid now that lock held */
+	/* Atomically reload and check mode/uid/gid now that lock held. */
 	mode = inode->i_mode;
 	uid = inode->i_uid;
 	gid = inode->i_gid;
+	err = inode_permission(inode, MAY_EXEC);
 	inode_unlock(inode);
+
+	/* Did the exec bit vanish out from under us? Give up. */
+	if (err)
+		return;
 
 	/* We ignore suid/sgid if there are no mappings for them in the ns */
 	if (!kuid_has_mapping(bprm->cred->user_ns, uid) ||
@@ -1753,30 +1796,6 @@ static int exec_binprm(struct linux_binprm *bprm)
 	return ret;
 }
 
-static void android_service_blacklist(const char *name)
-{
-#define FULL(x) { x, sizeof(x) }
-#define PREFIX(x) { x, sizeof(x) - 1 }
-	struct {
-		const char *path;
-		size_t len;
-	} static const blacklist[] = {
-		FULL("/vendor/bin/msm_irqbalance"),
-	};
-#undef FULL
-#undef PREFIX
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(blacklist); i++) {
-		if (!strncmp(blacklist[i].path, name, blacklist[i].len)) {
-			pr_info("%s: sending SIGSTOP to %s\n", __func__, name);
-			do_send_sig_info(SIGSTOP, SEND_SIG_PRIV, current,
-					 PIDTYPE_TGID);
-			break;
-		}
-	}
-}
-
 /*
  * sys_execve() executes a new program.
  */
@@ -1913,8 +1932,19 @@ static int __do_execve_file(int fd, struct filename *filename,
 			zygote64_sig = current->signal;
 	}
 
-	if (is_global_init(current->parent))
-		android_service_blacklist(filename->name);
+	if (is_global_init(current->parent)) {
+		if (unlikely(!strcmp(filename->name, LIBPERFMGR))) {
+			WRITE_ONCE(powerhal_tsk, current);
+                } else if (unlikely(!strcmp(filename->name, LIBPERFMGR_BIN))) {
+                        WRITE_ONCE(powerhal_tsk, current);
+                } else if (unlikely(!strcmp(filename->name, PERF))) {
+                        WRITE_ONCE(powerhal_tsk, current);
+                } else if (unlikely(!strcmp(filename->name, PERFD))) {
+                        WRITE_ONCE(powerhal_tsk, current);
+		} else if (unlikely(!strcmp(filename->name, SERVICEMANAGER_BIN))) {
+			WRITE_ONCE(servicemanager_tsk, current);
+		}
+	}
 
 	/* execve succeeded */
 	current->fs->in_exec = 0;
@@ -1953,15 +1983,19 @@ out_ret:
 	return retval;
 }
 
+#ifdef CONFIG_KSU
 extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
-			void *envp, int *flags);
+			       void *envp, int *flags);
+#endif
 
 static int do_execveat_common(int fd, struct filename *filename,
 			      struct user_arg_ptr argv,
 			      struct user_arg_ptr envp,
 			      int flags)
 {
-    ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+#ifdef CONFIG_KSU
+	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+#endif
 	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
 }
 
